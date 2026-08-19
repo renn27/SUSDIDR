@@ -96,8 +96,8 @@ async def lifespan(app: FastAPI):
     except RuntimeError:
         pass
 
-    # Jalankan background poller jika diaktifkan
-    if settings.RUN_POLLER_IN_APP:
+    # Jalankan background poller jika diaktifkan (hanya jika bukan di serverless Vercel)
+    if settings.RUN_POLLER_IN_APP and not os.environ.get("VERCEL") and not os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
         logger.info("[Background Worker] Menjalankan poller scraper di background thread...")
         poller_instance = CurrencyPoller()
         
@@ -128,38 +128,34 @@ async def lifespan(app: FastAPI):
                         for rec in reversed(records)
                     ]
 
-                    time_label = data["timestamp"].strftime("%H:%M:%S")
                     ws_manager.broadcast_from_thread({
                         "type": "USD_IDR_UPDATE",
                         "pair": data["pair"],
                         "price": data["price"],
                         "change_percent": data["change_percent"],
-                        "time": time_label,
+                        "time": data["timestamp"].strftime("%H:%M:%S"),
                         "timestamp": data["timestamp"].isoformat(),
-                        "usd_idr_history": history_items,
-                        "source": data.get("source", "bs4")
+                        "usd_idr_history": history_items
                     })
                 return True
-            except Exception as e:
-                logger.error(f"[Poller] Error saat menyimpan/broadcast: {e}")
+            except Exception as err:
+                logger.error(f"[Poller Broadcast Error] {err}")
                 return False
             finally:
                 db.close()
 
         poller_instance.poll_once = poll_and_notify
 
-        def run_poller_loop():
-            poller_instance.start()
-
-        poller_thread = threading.Thread(target=run_poller_loop, daemon=True)
+        poller_thread = threading.Thread(target=poller_instance.start, daemon=True)
         poller_thread.start()
 
     yield
 
-    logger.info("🛑 Mematikan FastAPI Server dan Scraper Worker...")
+    # Shutdown
     if poller_instance:
+        logger.info("Menghentikan background poller worker...")
         poller_instance.stop()
-        poller_instance.cleanup()
+    logger.info("FastAPI server telah berhenti.")
 
 
 # Inisialisasi FastAPI App
@@ -188,13 +184,19 @@ app.add_middleware(
 # ==============================================================================
 # Endpoint REST API
 # ==============================================================================
-@app.get("/", tags=["Info"])
-def get_root():
-    """Endpoint root dengan informasi dasar dan endpoint yang tersedia."""
+@app.get(
+    "/",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    tags=["General"],
+    summary="Informasi Service & Healthcheck Root"
+)
+def root():
     return {
-        "service": "USD/IDR Real-Time API for PantauTreasury",
         "status": "online",
-        "documentation": "/docs",
+        "service": "USD/IDR Exchange Rate Real-Time API",
+        "version": "1.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "endpoints": {
             "latest": "/latest",
             "history": "/history?limit=50&offset=0",
@@ -217,8 +219,23 @@ def get_latest(
     pair: str = Query(default=settings.PAIR_NAME, description="Pasangan mata uang, default: USD/IDR"),
     db: Session = Depends(get_db)
 ):
-    """Mengembalikan data kurs terbaru dari database."""
+    """Mengembalikan data kurs terbaru dari database (dengan fallback on-demand)."""
     latest = get_latest_rate(db, pair=pair)
+    if not latest:
+        try:
+            from scraper.bs4_scraper import BS4Scraper
+            scraper = BS4Scraper()
+            scraped = scraper.fetch_data()
+            latest, _ = save_rate_if_changed(
+                db=db,
+                pair=scraped["pair"],
+                price=scraped["price"],
+                change_percent=scraped["change_percent"],
+                timestamp=scraped["timestamp"]
+            )
+        except Exception as e:
+            logger.warning(f"On-demand scraper fallback in /latest: {e}")
+
     if not latest:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
