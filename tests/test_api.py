@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -57,9 +58,10 @@ def test_health_endpoint():
 
 
 def test_latest_endpoint_not_found_when_empty():
-    response = client.get("/latest")
-    assert response.status_code == 404
-    assert "Belum ada data kurs" in response.json()["detail"]
+    with patch("scraper.bs4_scraper.BS4Scraper.fetch_data", side_effect=Exception("Scraper offline")):
+        response = client.get("/latest")
+        assert response.status_code == 404
+        assert "Belum ada data kurs" in response.json()["detail"]
 
 
 def test_latest_endpoint_success_with_data():
