@@ -1,0 +1,39 @@
+# Python cache & virtualenv
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+
+# Database & SQLite files
+data/*.db
+data/*.sqlite
+*.db
+*.sqlite
+
+# Application logs
+logs/*.log
+*.log
+
+# Environment variables
+.env
+!.env.example
+
+# Pytest & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Playwright artifacts
+test-results/
+playwright-report/
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

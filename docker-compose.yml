@@ -1,0 +1,67 @@
+version: "3.8"
+
+services:
+  # -------------------------------------------------------------
+  # 1. API Service (FastAPI REST Server)
+  # -------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: usdidr_api
+    restart: unless-stopped
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      - ENVIRONMENT=production
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # -------------------------------------------------------------
+  # 2. Scraper Service (Background Poller Engine)
+  # -------------------------------------------------------------
+  scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: usdidr_scraper
+    restart: unless-stopped
+    command: ["python", "-m", "scraper.poller"]
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    depends_on:
+      - api
+    environment:
+      - ENVIRONMENT=production
+
+# -------------------------------------------------------------
+# Optional PostgreSQL Service (Uncomment jika ingin migrasi dari SQLite)
+# -------------------------------------------------------------
+#   db:
+#     image: postgres:15-alpine
+#     container_name: usdidr_postgres
+#     restart: unless-stopped
+#     environment:
+#       POSTGRES_DB: usdidr_db
+#       POSTGRES_USER: postgres
+#       POSTGRES_PASSWORD: secretpassword
+#     volumes:
+#       - postgres_data:/var/lib/postgresql/data
+#     ports:
+#       - "5432:5432"
+
+# volumes:
+#   postgres_data:
