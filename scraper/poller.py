@@ -97,9 +97,11 @@ class CurrencyPoller:
                     f"[KURS TETAP] {data['pair']} = Rp {data['price']:,.2f} [Source: {data.get('source', 'unknown')}]"
                 )
 
-            # Lakukan pembersihan database berkala setiap 1.000 siklus polling
-            if self.poll_count % 1000 == 0:
-                prune_old_rates(db, pair=data["pair"], max_keep=10000)
+            # Lakukan pembersihan database berkala otomatis setiap 500 siklus polling (maks 5.000 data)
+            if self.poll_count % 500 == 0:
+                pruned = prune_old_rates(db, pair=data["pair"], max_keep=5000)
+                if pruned > 0:
+                    logger.info(f"[Auto-Prune] Berhasil membersihkan {pruned} record kurs lama dari database.")
 
             return True
         except Exception as e:
@@ -119,8 +121,14 @@ class CurrencyPoller:
         logger.info(f"💾 Database: {settings.DATABASE_URL}")
         logger.info("=" * 60)
 
-        # Inisialisasi database schema
+        # Inisialisasi database schema & pembersihan awal
         init_db()
+        try:
+            db_init = SessionLocal()
+            prune_old_rates(db_init, pair=settings.PAIR_NAME, max_keep=5000)
+            db_init.close()
+        except Exception as err:
+            logger.warning(f"[Poller] Startup DB maintenance warning: {err}")
 
         self.running = True
 

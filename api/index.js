@@ -146,7 +146,7 @@ async function fetchExchangeRate() {
 
     if (!memoryHistory.length || memoryHistory[memoryHistory.length - 1].price !== historyItem.price) {
         memoryHistory.push(historyItem);
-        if (memoryHistory.length > 50) {
+        if (memoryHistory.length > 10) {
             memoryHistory.shift();
         }
     }
@@ -181,6 +181,15 @@ export default async function handler(req, res) {
             value: rateData.price,
             change_percent: rateData.change_percent
         }];
+
+        // ETag Caching (HTTP 304 Not Modified)
+        const etag = `"${rateData.price_formatted}-${rateData.time}-${historyData.length}"`;
+        res.setHeader('ETag', etag);
+
+        const clientEtag = req.headers['if-none-match'];
+        if (clientEtag && (clientEtag === etag || clientEtag.replace(/^W\//, '') === etag.replace(/^W\//, ''))) {
+            return res.status(304).end();
+        }
 
         const responsePayload = {
             success: true,

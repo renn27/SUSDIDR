@@ -97,3 +97,24 @@ def test_pagination_history(db_session):
     assert len(page2) == 4
     # Pastikan data page 2 berbeda dengan page 1
     assert page1[0].id != page2[0].id
+
+
+def test_prune_old_rates(db_session):
+    from database.crud import prune_old_rates
+    now = datetime.now(timezone.utc)
+    # Masukkan 15 data record
+    for i in range(15):
+        save_rate_if_changed(db_session, "USD/IDR", 15000.0 + i * 10, 0.01 * i, now)
+
+    _, total_before = get_rate_history(db_session, "USD/IDR", limit=100)
+    assert total_before == 15
+
+    # Prune agar hanya tersisa 5 data
+    deleted = prune_old_rates(db_session, "USD/IDR", max_keep=5)
+    assert deleted == 10
+
+    items_after, total_after = get_rate_history(db_session, "USD/IDR", limit=100)
+    assert total_after == 5
+    assert len(items_after) == 5
+    # Pastikan data yang tersisa adalah data paling baru (harga tertinggi)
+    assert items_after[0].price == 15140.0

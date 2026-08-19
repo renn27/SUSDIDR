@@ -10,10 +10,10 @@ ENV/
 .venv/
 
 # Database & SQLite files
-data/*.db
-data/*.sqlite
-*.db
-*.sqlite
+data/*.db*
+data/*.sqlite*
+*.db*
+*.sqlite*
 
 # Application logs
 logs/*.log

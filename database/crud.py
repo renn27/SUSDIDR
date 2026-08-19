@@ -28,7 +28,7 @@ def get_latest_rate(db: Session, pair: str = "USD/IDR") -> Optional[ExchangeRate
 def get_rate_history(
     db: Session,
     pair: str = "USD/IDR",
-    limit: int = 50,
+    limit: int = 10,
     offset: int = 0
 ) -> Tuple[List[ExchangeRate], int]:
     """
@@ -105,7 +105,7 @@ def save_rate_if_changed(
     return new_record, True
 
 
-def prune_old_rates(db: Session, pair: str = "USD/IDR", max_keep: int = 10000) -> int:
+def prune_old_rates(db: Session, pair: str = "USD/IDR", max_keep: int = 5000) -> int:
     """
     Menghapus data riwayat yang melebihi batas simpan maksimum agar database
     tetap ringan, cepat, dan tidak menghabiskan memori server.

@@ -32,7 +32,7 @@ class ExchangeRateHistoryResponse(BaseModel):
     """
     pair: str = Field(description="Pasangan mata uang", json_schema_extra={"example": "USD/IDR"})
     total: int = Field(description="Total keseluruhan record perubahan di database", json_schema_extra={"example": 150})
-    limit: int = Field(description="Jumlah data yang diminta per halaman", json_schema_extra={"example": 50})
+    limit: int = Field(description="Jumlah data yang diminta per halaman", json_schema_extra={"example": 10})
     offset: int = Field(description="Offset pagination", json_schema_extra={"example": 0})
     data: List[ExchangeRateHistoryItem] = Field(description="Daftar record kurs historis")
 

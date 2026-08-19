@@ -7,11 +7,12 @@ if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
 import asyncio
+import hashlib
 import threading
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import List, Optional, Set
-from fastapi import FastAPI, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status, Response, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -19,7 +20,7 @@ from sqlalchemy import text
 from config.settings import settings, WIB, get_wib_now
 from utils.logger import setup_logger
 from database.connection import init_db, get_db, SessionLocal
-from database.crud import get_latest_rate, get_rate_history, save_rate_if_changed
+from database.crud import get_latest_rate, get_rate_history, save_rate_if_changed, prune_old_rates
 from scraper.poller import CurrencyPoller
 from api.schemas import (
     ExchangeRateResponse,
@@ -29,6 +30,11 @@ from api.schemas import (
 )
 
 logger = setup_logger("api", "api.log")
+
+
+def compute_etag(content: str) -> str:
+    """Menghasilkan ETag berbasis MD5 hash untuk efisiensi caching HTTP 304."""
+    return f'"{hashlib.md5(content.encode("utf-8")).hexdigest()}"'
 
 # ==============================================================================
 # WebSocket Connection Manager (Untuk Live Push ke PantauTreasury)
@@ -94,8 +100,14 @@ async def lifespan(app: FastAPI):
     logger.info(f"Single-Process Poller Enabled: {settings.RUN_POLLER_IN_APP}")
     logger.info("=" * 60)
 
-    # Inisialisasi database schema
+    # Inisialisasi database schema & pembersihan awal
     init_db()
+    try:
+        db_cleanup = SessionLocal()
+        prune_old_rates(db_cleanup, pair=settings.PAIR_NAME, max_keep=5000)
+        db_cleanup.close()
+    except Exception as e:
+        logger.warning(f"Startup DB pruning warning: {e}")
 
     # Simpan event loop untuk WebSocket broadcast
     try:
@@ -124,8 +136,8 @@ async def lifespan(app: FastAPI):
                     timestamp=data["timestamp"]
                 )
                 if was_saved:
-                    # Ambil riwayat terbaru untuk disiarkan ke PantauTreasury
-                    records, _ = get_rate_history(db, pair=data["pair"], limit=30, offset=0)
+                    # Ambil riwayat terbaru untuk disiarkan ke PantauTreasury (maks 10 data)
+                    records, _ = get_rate_history(db, pair=data["pair"], limit=10, offset=0)
                     history_items = [
                         {
                             "price": f"{rec.price:.4f}",
@@ -145,6 +157,14 @@ async def lifespan(app: FastAPI):
                         "timestamp": data["timestamp"].isoformat(),
                         "usd_idr_history": history_items
                     })
+
+                # Otomatis pruning berkala setiap 500 siklus polling
+                poller_instance.poll_count += 1
+                if poller_instance.poll_count % 500 == 0:
+                    pruned = prune_old_rates(db, pair=data["pair"], max_keep=5000)
+                    if pruned > 0:
+                        logger.info(f"[Auto-Prune] Berhasil membersihkan {pruned} record kurs lama.")
+
                 return True
             except Exception as err:
                 logger.error(f"[Poller Broadcast Error] {err}")
@@ -208,7 +228,7 @@ def root():
         "timestamp": get_wib_now().isoformat(),
         "endpoints": {
             "latest": "/latest",
-            "history": "/history?limit=50&offset=0",
+            "history": "/history?limit=10&offset=0",
             "pantau_treasury": "/api/pantau-treasury",
             "open_er_compatible": "/v6/latest/USD",
             "websocket": "/ws",
@@ -222,13 +242,15 @@ def root():
     response_model=ExchangeRateResponse,
     status_code=status.HTTP_200_OK,
     tags=["Exchange Rates"],
-    summary="Ambil data kurs USD/IDR terbaru"
+    summary="Ambil data kurs USD/IDR terbaru (Didukung ETag & HTTP 304 Caching)"
 )
 def get_latest(
     pair: str = Query(default=settings.PAIR_NAME, description="Pasangan mata uang, default: USD/IDR"),
+    if_none_match: Optional[str] = Header(default=None, description="ETag dari request sebelumnya"),
+    response: Response = None,
     db: Session = Depends(get_db)
 ):
-    """Mengembalikan data kurs terbaru dari database (dengan fallback on-demand)."""
+    """Mengembalikan data kurs terbaru dari database (dengan fallback on-demand & ETag 304 Caching)."""
     latest = get_latest_rate(db, pair=pair)
     if not latest:
         try:
@@ -251,6 +273,15 @@ def get_latest(
             detail=f"Belum ada data kurs untuk '{pair}'. Scraper sedang mengumpulkan data awal."
         )
 
+    # Validasi ETag untuk HTTP 304 Not Modified Caching
+    etag = compute_etag(f"{latest.id}-{latest.price:.4f}-{latest.timestamp.isoformat()}")
+    if if_none_match and (if_none_match == etag or if_none_match.strip('"') == etag.strip('"')):
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
+
+    if response:
+        response.headers["ETag"] = etag
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+
     return ExchangeRateResponse(
         pair=latest.pair,
         price=latest.price,
@@ -268,7 +299,7 @@ def get_latest(
 )
 def get_history(
     pair: str = Query(default=settings.PAIR_NAME, description="Pasangan mata uang"),
-    limit: int = Query(default=50, ge=1, le=1000, description="Jumlah record per halaman"),
+    limit: int = Query(default=10, ge=1, le=1000, description="Jumlah record per halaman"),
     offset: int = Query(default=0, ge=0, description="Offset pagination"),
     db: Session = Depends(get_db)
 ):
@@ -298,10 +329,12 @@ def get_history(
 @app.get(
     "/api/pantau-treasury",
     tags=["PantauTreasury Integration"],
-    summary="Format khusus untuk konsumsi langsung dashboard PantauTreasury"
+    summary="Format khusus untuk konsumsi langsung dashboard PantauTreasury (Didukung ETag & HTTP 304)"
 )
 def get_pantau_treasury_data(
-    limit: int = Query(default=30, ge=1, le=100, description="Jumlah riwayat terakhir"),
+    limit: int = Query(default=10, ge=1, le=50, description="Jumlah riwayat terakhir (default: 10)"),
+    if_none_match: Optional[str] = Header(default=None, description="ETag dari request sebelumnya"),
+    response: Response = None,
     db: Session = Depends(get_db)
 ):
     """
@@ -347,6 +380,15 @@ def get_pantau_treasury_data(
             "latest": None,
             "history": []
         }
+
+    # Validasi ETag untuk HTTP 304 Not Modified Caching
+    etag = compute_etag(f"{latest.id}-{latest.price:.4f}-{latest.timestamp.isoformat()}-{len(records)}")
+    if if_none_match and (if_none_match == etag or if_none_match.strip('"') == etag.strip('"')):
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
+
+    if response:
+        response.headers["ETag"] = etag
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
 
     latest_time_label = latest.timestamp.strftime("%H:%M:%S")
 
@@ -401,9 +443,9 @@ async def websocket_endpoint(websocket: WebSocket, db: Session = Depends(get_db)
     """
     await ws_manager.connect(websocket)
     try:
-        # Kirim payload inisial saat client pertama kali tersambung
+        # Kirim payload inisial saat client pertama kali tersambung (maks 10 data)
         latest = get_latest_rate(db, pair=settings.PAIR_NAME)
-        records, _ = get_rate_history(db, pair=settings.PAIR_NAME, limit=30, offset=0)
+        records, _ = get_rate_history(db, pair=settings.PAIR_NAME, limit=10, offset=0)
         
         history_items = []
         for rec in reversed(records):

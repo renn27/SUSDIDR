@@ -154,3 +154,44 @@ def test_cors_headers():
     )
     assert response.status_code == 200
     assert response.headers.get("access-control-allow-origin") in ["*", "https://mywebsite.com"]
+
+
+def test_etag_caching_latest_endpoint():
+    db = TestingSessionLocal()
+    now = datetime.now(timezone.utc)
+    save_rate_if_changed(db, "USD/IDR", 16300.0, 0.05, now)
+    db.close()
+
+    # Request 1: Ambil data dan dapatkan ETag
+    res1 = client.get("/latest")
+    assert res1.status_code == 200
+    etag = res1.headers.get("etag")
+    assert etag is not None
+
+    # Request 2: Kirim If-None-Match dengan ETag yang sama -> Harus dapat 304 Not Modified
+    res2 = client.get("/latest", headers={"If-None-Match": etag})
+    assert res2.status_code == 304
+    assert res2.text == ""
+
+    # Request 3: ETag berbeda -> Harus dapat 200
+    res3 = client.get("/latest", headers={"If-None-Match": '"different-etag"'})
+    assert res3.status_code == 200
+
+
+def test_etag_caching_pantau_treasury_endpoint():
+    db = TestingSessionLocal()
+    now = datetime.now(timezone.utc)
+    save_rate_if_changed(db, "USD/IDR", 16350.0, -0.02, now)
+    db.close()
+
+    # Request 1: Ambil data dan dapatkan ETag
+    res1 = client.get("/api/pantau-treasury")
+    assert res1.status_code == 200
+    etag = res1.headers.get("etag")
+    assert etag is not None
+
+    # Request 2: Kirim If-None-Match -> Harus dapat 304 Not Modified
+    res2 = client.get("/api/pantau-treasury", headers={"If-None-Match": etag})
+    assert res2.status_code == 304
+    assert res2.text == ""
+
