@@ -1,7 +1,16 @@
 import os
+from datetime import datetime, timezone, timedelta
 from typing import List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
+
+# Definisi Zona Waktu WIB (Waktu Indonesia Barat / UTC+7)
+WIB = timezone(timedelta(hours=7), name="WIB")
+
+
+def get_wib_now() -> datetime:
+    """Mengembalikan objek datetime saat ini dalam zona waktu WIB (UTC+7)."""
+    return datetime.now(WIB)
 
 
 class Settings(BaseSettings):

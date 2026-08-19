@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
-from config.settings import settings
+from config.settings import settings, WIB, get_wib_now
 from utils.logger import setup_logger
 from database.connection import init_db, get_db, SessionLocal
 from database.crud import get_latest_rate, get_rate_history, save_rate_if_changed
@@ -204,7 +204,8 @@ def root():
         "status": "online",
         "service": "USD/IDR Exchange Rate Real-Time API",
         "version": "1.0.0",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timezone": "WIB (UTC+7)",
+        "timestamp": get_wib_now().isoformat(),
         "endpoints": {
             "latest": "/latest",
             "history": "/history?limit=50&offset=0",

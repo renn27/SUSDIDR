@@ -1,11 +1,11 @@
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
-from config.settings import settings
+from config.settings import settings, WIB
 from utils.logger import setup_logger
 
 logger = setup_logger("bs4_scraper")
@@ -146,7 +146,7 @@ class BS4Scraper:
                     "pair": settings.PAIR_NAME,
                     "price": price,
                     "change_percent": change_percent,
-                    "timestamp": datetime.now(timezone.utc),
+                    "timestamp": settings.get_wib_now() if hasattr(settings, "get_wib_now") else datetime.now(timezone(timedelta(hours=7))),
                     "source": "bs4-fastpath"
                 }
             except Exception:
@@ -215,6 +215,6 @@ class BS4Scraper:
             "pair": settings.PAIR_NAME,
             "price": price,
             "change_percent": change_percent,
-            "timestamp": datetime.now(timezone.utc),
+            "timestamp": datetime.now(timezone(timedelta(hours=7))),
             "source": "bs4"
         }
