@@ -286,6 +286,21 @@ def get_pantau_treasury_data(
     - history: Array [{ price, time, value }] untuk dropdown riwayat kurs
     """
     latest = get_latest_rate(db, pair=settings.PAIR_NAME)
+    if not latest:
+        try:
+            from scraper.bs4_scraper import BS4Scraper
+            scraper = BS4Scraper()
+            scraped = scraper.fetch_data()
+            latest, _ = save_rate_if_changed(
+                db=db,
+                pair=scraped["pair"],
+                price=scraped["price"],
+                change_percent=scraped["change_percent"],
+                timestamp=scraped["timestamp"]
+            )
+        except Exception as e:
+            logger.warning(f"On-demand scraper fallback: {e}")
+
     records, _ = get_rate_history(db, pair=settings.PAIR_NAME, limit=limit, offset=0)
 
     # Susun riwayat dari terlama ke terbaru (sesuai format state.usdIdrHistory)
