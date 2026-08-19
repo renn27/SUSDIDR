@@ -2,19 +2,14 @@
   "version": 2,
   "builds": [
     {
-      "src": "api/main.py",
+      "src": "api/index.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "api/main.py"
+      "dest": "api/index.py"
     }
-  ],
-  "env": {
-    "RUN_POLLER_IN_APP": "false",
-    "ENVIRONMENT": "production",
-    "CORS_ALLOWED_ORIGINS": "*"
-  }
+  ]
 }

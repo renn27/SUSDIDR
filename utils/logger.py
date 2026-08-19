@@ -40,22 +40,23 @@ def setup_logger(name: str, log_filename: str = None) -> logging.Logger:
     console_handler.setFormatter(log_format)
     logger.addHandler(console_handler)
 
-    # 2. File Handler dengan Rotasi Otomatis (Max 5MB per file, simpan 5 backup)
-    try:
-        os.makedirs(settings.LOG_DIR, exist_ok=True)
-        if not log_filename:
-            log_filename = f"{name}.log"
-        log_path = os.path.join(settings.LOG_DIR, log_filename)
+    # 2. File Handler dengan Rotasi Otomatis (Hanya jika bukan di serverless Vercel)
+    if not os.environ.get("VERCEL") and not os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+        try:
+            os.makedirs(settings.LOG_DIR, exist_ok=True)
+            if not log_filename:
+                log_filename = f"{name}.log"
+            log_path = os.path.join(settings.LOG_DIR, log_filename)
 
-        file_handler = RotatingFileHandler(
-            filename=log_path,
-            maxBytes=5 * 1024 * 1024,  # 5 MB
-            backupCount=5,
-            encoding="utf-8"
-        )
-        file_handler.setFormatter(log_format)
-        logger.addHandler(file_handler)
-    except Exception as e:
-        logger.warning(f"Gagal menginisialisasi file logging pada {settings.LOG_DIR}: {e}")
+            file_handler = RotatingFileHandler(
+                filename=log_path,
+                maxBytes=settings.LOG_MAX_BYTES,
+                backupCount=settings.LOG_BACKUP_COUNT,
+                encoding="utf-8"
+            )
+            file_handler.setFormatter(log_format)
+            logger.addHandler(file_handler)
+        except Exception as e:
+            logger.warning(f"Gagal menginisialisasi file logging pada {settings.LOG_DIR}: {e}")
 
     return logger
