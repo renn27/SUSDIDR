@@ -14,7 +14,7 @@ class Settings(BaseSettings):
 
     # Database Configuration
     DATABASE_URL: str = Field(
-        default="sqlite:///./data/exchange_rates.db",
+        default="sqlite:////tmp/exchange_rates.db" if os.environ.get("VERCEL") else "sqlite:///./data/exchange_rates.db",
         description="Koneksi database (SQLite default, atau PostgreSQL: postgresql://user:pass@host:5432/dbname)"
     )
 
