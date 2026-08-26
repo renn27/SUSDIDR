@@ -7,7 +7,7 @@
 let usdMemoryCache = {
     data: null,
     lastFetchedAt: 0,
-    ttlMs: 3500 // Cache 3.5 detik (sangat responsif untuk polling cepat 5-8s)
+    ttlMs: 3000 // Cache 3 detik
 };
 let usdMemoryHistory = [];
 
@@ -88,7 +88,7 @@ function getTreasuryMinuteBucket(dateStr) {
 async function fetchExchangeRate({ force = false } = {}) {
     const nowMs = Date.now();
     
-    // Kembalikan cache jika masih dalam batas TTL 3.5 detik (kecuali force refresh)
+    // Kembalikan cache jika masih dalam batas TTL 3 detik (kecuali force refresh)
     if (!force && usdMemoryCache.data && (nowMs - usdMemoryCache.lastFetchedAt < usdMemoryCache.ttlMs)) {
         return usdMemoryCache.data;
     }
@@ -202,7 +202,7 @@ async function fetchExchangeRate({ force = false } = {}) {
     usdMemoryCache = {
         data: result,
         lastFetchedAt: nowMs,
-        ttlMs: 3500
+        ttlMs: 3000
     };
 
     return result;
@@ -217,9 +217,14 @@ async function fetchTreasuryGold({ force = false } = {}) {
     const nowMs = Date.now();
 
     // SMART MINUTE CACHE:
-    // Jika data menit saat ini sudah ada di cache dan ini bukan force refresh,
-    // kembalikan cache langsung tanpa menembak ulang API Treasury (Hemat 90%+ request).
-    if (!force && goldMemoryCache.data && goldMemoryCache.minuteBucket === timeInfo.minuteBucketKey) {
+    // Jika data menit saat ini sudah valid di cache dan BUKAN force refresh,
+    // kita gunakan cache. Tapi jika detik 00-08 atau belum menit aktif, selalu tembak live!
+    const isMinuteTransition = timeInfo.currentSecond <= 8;
+    const isCacheValid = !force && !isMinuteTransition && 
+                         goldMemoryCache.data && 
+                         goldMemoryCache.minuteBucket === timeInfo.minuteBucketKey;
+
+    if (isCacheValid) {
         return goldMemoryCache.data;
     }
 
@@ -230,7 +235,7 @@ async function fetchTreasuryGold({ force = false } = {}) {
 
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 4500);
+        const timeoutId = setTimeout(() => controller.abort(), 4000);
 
         const res = await fetch('https://api.treasury.id/api/v1/antigrvty/gold/rate', {
             method: 'POST',
@@ -324,22 +329,35 @@ async function fetchTreasuryGold({ force = false } = {}) {
  * Handler Utama Vercel Serverless Function
  */
 export default async function handler(req, res) {
-    // 1. Headers CORS & Caching
+    // Headers CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control');
-    // Edge Cache Vercel: Cache 3 detik di CDN Edge, 3 detik stale-while-revalidate
-    res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=3, stale-while-revalidate=3');
 
     if (req.method === 'OPTIONS') {
         return res.status(200).end();
     }
 
     try {
-        // Cek apakah request meminta force live refresh (misal tombol refresh besar ditekan)
+        const timeInfo = getWibTimeInfo();
+        const isMinuteTransition = timeInfo.currentSecond <= 8;
+
+        // Cek apakah request meminta force live refresh (misal tombol refresh besar atau detik 1 auto-sync)
         const isForce = req.query.force === 'true' || 
                         req.query.refresh === 'true' || 
+                        isMinuteTransition ||
                         (req.headers['cache-control'] && req.headers['cache-control'].includes('no-cache'));
+
+        // Caching Header:
+        // Saat detik 00-08 (jendela rilis Treasury) atau saat force refresh -> NO-CACHE sama sekali agar CDN tidak menahan data lama!
+        // Saat detik 09-59 dan data sudah aktif -> Cache 3 detik di CDN edge untuk efisiensi
+        if (isForce || isMinuteTransition) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+        } else {
+            res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=3, stale-while-revalidate=3');
+        }
 
         // Eksekusi paralel Google Finance USD/IDR dan Treasury Gold
         const [rateResult, goldResult] = await Promise.allSettled([
@@ -369,15 +387,15 @@ export default async function handler(req, res) {
             updated_at: goldData.updated_at
         }];
 
-        const timeInfo = getWibTimeInfo();
+        // ETag Caching (HTTP 304 Not Modified) hanya di luar jendela transisi menit
+        if (!isForce && !isMinuteTransition) {
+            const etag = `"${goldData.buy}-${goldData.sell}-${rateData.price_formatted}-${rateData.time}-${usdHistory.length}-${goldHistory.length}"`;
+            res.setHeader('ETag', etag);
 
-        // ETag Caching (HTTP 304 Not Modified) jika bukan force refresh
-        const etag = `"${goldData.buy}-${goldData.sell}-${rateData.price_formatted}-${rateData.time}-${usdHistory.length}-${goldHistory.length}"`;
-        res.setHeader('ETag', etag);
-
-        const clientEtag = req.headers['if-none-match'];
-        if (!isForce && clientEtag && (clientEtag === etag || clientEtag.replace(/^W\//, '') === etag.replace(/^W\//, ''))) {
-            return res.status(304).end();
+            const clientEtag = req.headers['if-none-match'];
+            if (clientEtag && (clientEtag === etag || clientEtag.replace(/^W\//, '') === etag.replace(/^W\//, ''))) {
+                return res.status(304).end();
+            }
         }
 
         const responsePayload = {
@@ -390,7 +408,7 @@ export default async function handler(req, res) {
             usd_idr: rateData,
             gold_history: goldHistory,
             usd_idr_history: usdHistory,
-            // Backward-Compatibility Aliases (Menjamin kompatibilitas 100%):
+            // Backward-Compatibility Aliases:
             price: rateData.price,
             price_formatted: rateData.price_formatted,
             change_percent: rateData.change_percent,
