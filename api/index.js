@@ -52,9 +52,8 @@ function getWibTimeInfo() {
     const currentSecond = parseInt(parts[2], 10) || 0;
     const currentMinute = parseInt(parts[1], 10) || 0;
 
-    // Format ISO dengan penyesuaian +07:00
-    const wibMs = now.getTime() + (7 * 3600 * 1000);
-    const isoWib = new Date(wibMs).toISOString().replace('Z', '+07:00');
+    // Format ISO standar UTC untuk sinkronisasi waktu client-server yang akurat
+    const isoWib = now.toISOString();
 
     return { timeWib, isoWib, rawDate: now, minuteBucketKey, currentSecond, currentMinute };
 }
@@ -389,7 +388,7 @@ export default async function handler(req, res) {
 
         // ETag Caching (HTTP 304 Not Modified) hanya di luar jendela transisi menit
         if (!isForce && !isMinuteTransition) {
-            const etag = `"${goldData.buy}-${goldData.sell}-${rateData.price_formatted}-${rateData.time}-${usdHistory.length}-${goldHistory.length}"`;
+            const etag = `"${goldData.buy}-${goldData.sell}-${rateData.price_formatted}-${goldData.updated_at || ''}-${usdHistory.length}-${goldHistory.length}"`;
             res.setHeader('ETag', etag);
 
             const clientEtag = req.headers['if-none-match'];
@@ -403,17 +402,10 @@ export default async function handler(req, res) {
             server_time: timeInfo.timeWib,
             timezone: 'WIB (UTC+7)',
             timestamp: timeInfo.isoWib,
-            // Objek Utama:
             gold: goldData,
             usd_idr: rateData,
             gold_history: goldHistory,
-            usd_idr_history: usdHistory,
-            // Backward-Compatibility Aliases:
-            price: rateData.price,
-            price_formatted: rateData.price_formatted,
-            change_percent: rateData.change_percent,
-            time: rateData.time,
-            history: usdHistory
+            usd_idr_history: usdHistory
         };
 
         return res.status(200).json(responsePayload);
