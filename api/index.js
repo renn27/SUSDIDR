@@ -47,15 +47,25 @@ function getWibTimeInfo() {
     });
     const minuteBucketKey = minuteFormatter.format(now);
 
-    // Detik saat ini dalam WIB
+    // Detik & menit saat ini dalam WIB
     const parts = timeWib.split(':');
     const currentSecond = parseInt(parts[2], 10) || 0;
     const currentMinute = parseInt(parts[1], 10) || 0;
 
+    // Format YYYY-MM-DD HH:mm:ss untuk timestamp lengkap WIB
+    const dateFormatter = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Jakarta',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+    });
+    const dateWib = dateFormatter.format(now);
+    const updatedAtWib = `${dateWib} ${timeWib}`;
+
     // Format ISO standar UTC untuk sinkronisasi waktu client-server yang akurat
     const isoWib = now.toISOString();
 
-    return { timeWib, isoWib, rawDate: now, minuteBucketKey, currentSecond, currentMinute };
+    return { timeWib, updatedAtWib, dateWib, isoWib, rawDate: now, minuteBucketKey, currentSecond, currentMinute };
 }
 
 /**
@@ -95,7 +105,7 @@ function parseGoogleFinanceUtcTime(html) {
         if (!match) return null;
 
         const rawStr = (match[1] || match[0]).replace(/[\s\u202f\u00a0]+/g, ' ').trim();
-        const parts = rawStr.match(/([A-Za-z]{3})\s+(\d{1,2}),\s*(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)\s*UTC/i);
+        const parts = rawStr.match(/([A-Za-z]{3})\s+(\d{1,2}),\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)\s*UTC/i);
         if (!parts) return null;
 
         const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
@@ -105,8 +115,8 @@ function parseGoogleFinanceUtcTime(html) {
         const day = parseInt(parts[2], 10);
         let hour = parseInt(parts[3], 10);
         const minute = parseInt(parts[4], 10);
-        const second = parseInt(parts[5], 10);
-        const period = parts[6].toUpperCase();
+        const second = parts[5] ? parseInt(parts[5], 10) : 0;
+        const period = (parts[6] || parts[5]).toUpperCase();
 
         if (period === 'PM' && hour < 12) hour += 12;
         if (period === 'AM' && hour === 12) hour = 0;
@@ -288,11 +298,11 @@ async function fetchExchangeRate({ force = false } = {}) {
         }
     }
 
-    const { timeWib: serverTimeWib, isoWib: serverIsoWib } = getWibTimeInfo();
+    const { timeWib: serverTimeWib, updatedAtWib: serverUpdatedAtWib, isoWib: serverIsoWib } = getWibTimeInfo();
 
     // Gunakan waktu pasar resmi jika tersedia, atau fallback ke waktu server jika belum ada
     const actualTimeWib = marketTimeInfo ? marketTimeInfo.timeWib : serverTimeWib;
-    const actualUpdatedAt = marketTimeInfo ? marketTimeInfo.updatedAtWib : `${serverTimeWib}`;
+    const actualUpdatedAt = marketTimeInfo ? marketTimeInfo.updatedAtWib : serverUpdatedAtWib;
     const actualTimestamp = marketTimeInfo ? marketTimeInfo.isoUtc : serverIsoWib;
     const rawMarketTime = marketTimeInfo ? marketTimeInfo.rawMarketTime : '';
 
