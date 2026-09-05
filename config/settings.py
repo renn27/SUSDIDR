@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     # Logging Configuration
     LOG_LEVEL: str = Field(default="INFO", description="Level logging (DEBUG, INFO, WARNING, ERROR)")
     LOG_DIR: str = Field(default="./logs", description="Direktori penyimpanan file log")
+    LOG_MAX_BYTES: int = Field(default=5 * 1024 * 1024, description="Ukuran maksimal per file log sebelum rotasi (5MB)")
+    LOG_BACKUP_COUNT: int = Field(default=3, description="Jumlah cadangan file log yang disimpan")
 
     @property
     def cors_origins_list(self) -> List[str]:

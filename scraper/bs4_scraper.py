@@ -5,7 +5,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
-from config.settings import settings, WIB
+from config.settings import settings, WIB, get_wib_now
 from utils.logger import setup_logger
 
 logger = setup_logger("bs4_scraper")
@@ -19,6 +19,46 @@ class ScraperException(Exception):
 class SelectorNotFoundException(ScraperException):
     """Raised when expected HTML elements/selectors are not found."""
     pass
+
+
+def parse_google_finance_utc_time(html_text: str) -> Optional[Dict[str, Any]]:
+    """
+    Mengekstrak dan menormalisasi waktu quote resmi dari Google Finance (contoh: "Sep 4, 11:58:19 PM UTC").
+    Mengembalikan dict berisi datetime WIB, string waktu HH:MM:SS, string tanggal, dan raw string.
+    """
+    if not html_text:
+        return None
+    try:
+        match = re.search(r'<div[^>]*class="[^"]*jZZ2de[^"]*"[^>]*>([^<]+)</div>', html_text, re.IGNORECASE)
+        if not match:
+            match = re.search(r'([A-Za-z]{3}\s+\d{1,2},\s+\d{1,2}:\d{2}:\d{2}[\s\u202f\u00a0]*(?:AM|PM)\s*UTC)', html_text, re.IGNORECASE)
+
+        if not match:
+            return None
+
+        raw_str = re.sub(r'[\s\u202f\u00a0]+', ' ', match.group(1)).strip()
+        parts = re.search(r'([A-Za-z]{3})\s+(\d{1,2}),\s*(\d{1,2}:\d{2}:\d{2}\s*(?:AM|PM))\s*UTC', raw_str, re.IGNORECASE)
+        if not parts:
+            return None
+
+        month_str, day_str, time_part = parts.groups()
+        now_utc = datetime.now(timezone.utc)
+        year = now_utc.year
+        dt_str = f"{month_str} {int(day_str):02d} {year} {time_part.upper()}"
+        dt = datetime.strptime(dt_str, "%b %d %Y %I:%M:%S %p").replace(tzinfo=timezone.utc)
+
+        if now_utc.month == 1 and dt.month == 12:
+            dt = dt.replace(year=year - 1)
+
+        wib_dt = dt.astimezone(timezone(timedelta(hours=7)))
+        return {
+            "dt_wib": wib_dt,
+            "time_str": wib_dt.strftime("%H:%M:%S"),
+            "updated_at": wib_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "raw_str": raw_str
+        }
+    except Exception:
+        return None
 
 
 class BS4Scraper:
@@ -101,6 +141,10 @@ class BS4Scraper:
 
         html_text = response.text
 
+        # Ekstraksi timestamp resmi Google Finance
+        market_time = parse_google_finance_utc_time(html_text)
+        timestamp = market_time["dt_wib"] if market_time else get_wib_now()
+
         # =========================================================================
         # FAST-PATH REGEX: Ekstraksi langsung tanpa overhead parsing tree 1MB HTML
         # =========================================================================
@@ -122,17 +166,17 @@ class BS4Scraper:
 
         # Pattern persentase perubahan quote utama (DAicsd adalah container spesifik quote utama)
         fast_change_match = re.search(
-            r'class="DAicsd"[^>]*>[\s\S]*?([+-]?[0-9]+\.[0-9]+%)',
+            r'class="DAicsd"[^>]*>[\s\S]*?([+-]?[0-9]+(?:\.[0-9]+)?%)',
             html_text
         )
         if not fast_change_match:
             fast_change_match = re.search(
-                r'class="JwB6zf"[^>]*>([+-]?[0-9]+\.[0-9]+%)<',
+                r'class="JwB6zf"[^>]*>([+-]?[0-9]+(?:\.[0-9]+)?%)<',
                 html_text
             )
         if not fast_change_match:
             fast_change_match = re.search(
-                r'jsname="vY9t3b"[^>]*>[\s\S]*?([+-]?[0-9]+\.[0-9]+%)',
+                r'jsname="vY9t3b"[^>]*>[\s\S]*?([+-]?[0-9]+(?:\.[0-9]+)?%)',
                 html_text
             )
 
@@ -146,7 +190,10 @@ class BS4Scraper:
                     "pair": settings.PAIR_NAME,
                     "price": price,
                     "change_percent": change_percent,
-                    "timestamp": settings.get_wib_now() if hasattr(settings, "get_wib_now") else datetime.now(timezone(timedelta(hours=7))),
+                    "timestamp": timestamp,
+                    "time": market_time["time_str"] if market_time else timestamp.strftime("%H:%M:%S"),
+                    "updated_at": market_time["updated_at"] if market_time else timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    "market_time_raw": market_time["raw_str"] if market_time else "",
                     "source": "bs4-fastpath"
                 }
             except Exception:
@@ -215,6 +262,9 @@ class BS4Scraper:
             "pair": settings.PAIR_NAME,
             "price": price,
             "change_percent": change_percent,
-            "timestamp": datetime.now(timezone(timedelta(hours=7))),
+            "timestamp": timestamp,
+            "time": market_time["time_str"] if market_time else timestamp.strftime("%H:%M:%S"),
+            "updated_at": market_time["updated_at"] if market_time else timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            "market_time_raw": market_time["raw_str"] if market_time else "",
             "source": "bs4"
         }

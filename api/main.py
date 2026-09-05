@@ -399,6 +399,7 @@ def get_pantau_treasury_data(
         "price_formatted": f"{latest.price:.4f}",
         "change_percent": latest.change_percent,
         "time": latest_time_label,
+        "updated_at": latest.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
         "timestamp": latest.timestamp.isoformat(),
         "history": history_items,
         "usd_idr_history": history_items

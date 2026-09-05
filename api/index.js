@@ -82,6 +82,77 @@ function getTreasuryMinuteBucket(dateStr) {
 }
 
 /**
+ * Ekstraksi & normalisasi timestamp resmi Google Finance (misal: "Sep 4, 11:58:19 PM UTC")
+ * Menghasilkan Date object UTC, string waktu WIB (HH:mm:ss), updated_at WIB (YYYY-MM-DD HH:mm:ss), dan ISO string.
+ */
+function parseGoogleFinanceUtcTime(html) {
+    if (!html) return null;
+
+    try {
+        const match = html.match(/<div[^>]*class="[^"]*jZZ2de[^"]*"[^>]*>([^<]+)<\/div>/i)
+                   || html.match(/([A-Za-z]{3}\s+\d{1,2},\s+\d{1,2}:\d{2}:\d{2}[\s\u202f\u00a0]*(?:AM|PM)\s*UTC)/i);
+
+        if (!match) return null;
+
+        const rawStr = (match[1] || match[0]).replace(/[\s\u202f\u00a0]+/g, ' ').trim();
+        const parts = rawStr.match(/([A-Za-z]{3})\s+(\d{1,2}),\s*(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)\s*UTC/i);
+        if (!parts) return null;
+
+        const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+        const monthIndex = months.indexOf(parts[1].toLowerCase());
+        if (monthIndex === -1) return null;
+
+        const day = parseInt(parts[2], 10);
+        let hour = parseInt(parts[3], 10);
+        const minute = parseInt(parts[4], 10);
+        const second = parseInt(parts[5], 10);
+        const period = parts[6].toUpperCase();
+
+        if (period === 'PM' && hour < 12) hour += 12;
+        if (period === 'AM' && hour === 12) hour = 0;
+
+        const now = new Date();
+        let year = now.getUTCFullYear();
+        // Penanganan transisi pergantian tahun (misal server di Januari tapi data pasar dari akhir Desember)
+        if (now.getUTCMonth() === 0 && monthIndex === 11) {
+            year -= 1;
+        }
+
+        const utcMs = Date.UTC(year, monthIndex, day, hour, minute, second);
+        const dateObj = new Date(utcMs);
+        if (Number.isNaN(dateObj.getTime())) return null;
+
+        // Format WIB (UTC+7)
+        const timeWib = new Intl.DateTimeFormat('en-GB', {
+            timeZone: 'Asia/Jakarta',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        }).format(dateObj);
+
+        const dateFormatter = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Jakarta',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+        });
+        const dateWib = dateFormatter.format(dateObj); // "YYYY-MM-DD"
+        const updatedAtWib = `${dateWib} ${timeWib}`;
+
+        return {
+            dateObj,
+            timeWib,
+            updatedAtWib,
+            isoUtc: dateObj.toISOString(),
+            rawMarketTime: rawStr
+        };
+    } catch (err) {
+        return null;
+    }
+}
+
+/**
  * 1. Mengambil data kurs USD/IDR dari Google Finance dengan Fast-Path Regex & Fallback
  */
 async function fetchExchangeRate({ force = false } = {}) {
@@ -95,6 +166,7 @@ async function fetchExchangeRate({ force = false } = {}) {
     let price = null;
     let changePercent = -0.17;
     let source = 'unknown';
+    let marketTimeInfo = null;
 
     // TIER 1: Google Finance Scraping (Fast-Path Regex < 0.2ms)
     try {
@@ -124,13 +196,16 @@ async function fetchExchangeRate({ force = false } = {}) {
                 source = 'google-finance';
             }
 
-            // Fast-Path Regex untuk Persentase Perubahan
-            const changeMatch = html.match(/class="DAicsd"[^>]*>[\s\S]*?([+-]?[0-9]+\.[0-9]+%)/)
-                             || html.match(/class="JwB6zf"[^>]*>([+-]?[0-9]+\.[0-9]+%)</);
+            // Fast-Path Regex untuk Persentase Perubahan (mendukung desimal maupun bulat e.g. 0%, +1%, -0.17%)
+            const changeMatch = html.match(/class="DAicsd"[^>]*>[\s\S]*?([+-]?[0-9]+(?:\.[0-9]+)?%)/)
+                             || html.match(/class="JwB6zf"[^>]*>([+-]?[0-9]+(?:\.[0-9]+)?%)</);
             
             if (changeMatch && changeMatch[1]) {
                 changePercent = parseFloat(changeMatch[1].replace(/%/g, '').replace(/,/g, ''));
             }
+
+            // Ekstraksi waktu pasar resmi Google Finance (misal: "Sep 4, 11:58:19 PM UTC")
+            marketTimeInfo = parseGoogleFinanceUtcTime(html);
         }
     } catch (e) {
         // Fallback gracefully
@@ -150,6 +225,40 @@ async function fetchExchangeRate({ force = false } = {}) {
                 if (erData && erData.rates && erData.rates.IDR) {
                     price = parseFloat(erData.rates.IDR);
                     source = 'open-er-fallback';
+
+                    // Parse timestamp Open Exchange Rates
+                    let erDate = null;
+                    if (erData.time_last_update_unix) {
+                        erDate = new Date(erData.time_last_update_unix * 1000);
+                    } else if (erData.time_last_update_utc) {
+                        erDate = new Date(erData.time_last_update_utc);
+                    }
+
+                    if (erDate && !Number.isNaN(erDate.getTime())) {
+                        const timeWib = new Intl.DateTimeFormat('en-GB', {
+                            timeZone: 'Asia/Jakarta',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: '2-digit',
+                            hour12: false
+                        }).format(erDate);
+
+                        const dateFormatter = new Intl.DateTimeFormat('en-CA', {
+                            timeZone: 'Asia/Jakarta',
+                            year: 'numeric',
+                            month: '2-digit',
+                            day: '2-digit'
+                        });
+                        const dateWib = dateFormatter.format(erDate);
+
+                        marketTimeInfo = {
+                            dateObj: erDate,
+                            timeWib: timeWib,
+                            updatedAtWib: `${dateWib} ${timeWib}`,
+                            isoUtc: erDate.toISOString(),
+                            rawMarketTime: erData.time_last_update_utc || erDate.toUTCString()
+                        };
+                    }
                 }
             }
         } catch (e) {
@@ -160,32 +269,54 @@ async function fetchExchangeRate({ force = false } = {}) {
     // TIER 3: Memori Cache Terakhir
     if (!price) {
         if (usdMemoryHistory.length) {
-            price = usdMemoryHistory[usdMemoryHistory.length - 1].value;
-            changePercent = usdMemoryHistory[usdMemoryHistory.length - 1].change_percent;
+            const lastItem = usdMemoryHistory[usdMemoryHistory.length - 1];
+            price = lastItem.value;
+            changePercent = lastItem.change_percent;
             source = 'memory-fallback';
+            if (lastItem.timestamp || lastItem.updated_at) {
+                marketTimeInfo = {
+                    dateObj: new Date(lastItem.timestamp || lastItem.updated_at),
+                    timeWib: lastItem.time,
+                    updatedAtWib: lastItem.updated_at || lastItem.time,
+                    isoUtc: lastItem.timestamp || new Date().toISOString(),
+                    rawMarketTime: lastItem.market_time_raw || ''
+                };
+            }
         } else {
             price = 17800.00;
             source = 'default-fallback';
         }
     }
 
-    const { timeWib, isoWib } = getWibTimeInfo();
+    const { timeWib: serverTimeWib, isoWib: serverIsoWib } = getWibTimeInfo();
+
+    // Gunakan waktu pasar resmi jika tersedia, atau fallback ke waktu server jika belum ada
+    const actualTimeWib = marketTimeInfo ? marketTimeInfo.timeWib : serverTimeWib;
+    const actualUpdatedAt = marketTimeInfo ? marketTimeInfo.updatedAtWib : `${serverTimeWib}`;
+    const actualTimestamp = marketTimeInfo ? marketTimeInfo.isoUtc : serverIsoWib;
+    const rawMarketTime = marketTimeInfo ? marketTimeInfo.rawMarketTime : '';
 
     const result = {
         pair: 'USD/IDR',
         price: price,
         price_formatted: price.toFixed(4),
         change_percent: changePercent,
-        time: timeWib,
+        time: actualTimeWib,
+        updated_at: actualUpdatedAt,
+        timestamp: actualTimestamp,
+        market_time_raw: rawMarketTime,
+        server_time: serverTimeWib,
         timezone: 'WIB (UTC+7)',
-        timestamp: isoWib,
         source: source
     };
 
-    // Deduplikasi Riwayat USD/IDR: Hanya tambahkan jika harga berubah
+    // Riwayat USD/IDR: Tambahkan jika harga berubah atau belum ada riwayat sama sekali
     const historyItem = {
         price: result.price_formatted,
-        time: timeWib,
+        time: actualTimeWib,
+        updated_at: actualUpdatedAt,
+        timestamp: actualTimestamp,
+        market_time_raw: rawMarketTime,
         value: price,
         change_percent: changePercent
     };
@@ -195,6 +326,12 @@ async function fetchExchangeRate({ force = false } = {}) {
         if (usdMemoryHistory.length > 10) {
             usdMemoryHistory.shift();
         }
+    } else if (usdMemoryHistory.length > 0) {
+        // Jika harga sama tapi timestamp pasar terupdate, sinkronkan data item terakhir
+        usdMemoryHistory[usdMemoryHistory.length - 1].time = actualTimeWib;
+        usdMemoryHistory[usdMemoryHistory.length - 1].updated_at = actualUpdatedAt;
+        usdMemoryHistory[usdMemoryHistory.length - 1].timestamp = actualTimestamp;
+        usdMemoryHistory[usdMemoryHistory.length - 1].market_time_raw = rawMarketTime;
     }
 
     // Perbarui in-memory cache
@@ -312,6 +449,10 @@ async function fetchTreasuryGold({ force = false } = {}) {
         if (goldMemoryHistory.length > 10) {
             goldMemoryHistory.shift();
         }
+    } else if (goldMemoryHistory.length > 0) {
+        // Jika harga sama tapi ada pergantian menit, sinkronkan waktu record terakhir
+        goldMemoryHistory[goldMemoryHistory.length - 1].time = historyItem.time;
+        goldMemoryHistory[goldMemoryHistory.length - 1].updated_at = historyItem.updated_at;
     }
 
     // Perbarui in-memory cache
@@ -388,7 +529,7 @@ export default async function handler(req, res) {
 
         // ETag Caching (HTTP 304 Not Modified) hanya di luar jendela transisi menit
         if (!isForce && !isMinuteTransition) {
-            const etag = `"${goldData.buy}-${goldData.sell}-${rateData.price_formatted}-${goldData.updated_at || ''}-${usdHistory.length}-${goldHistory.length}"`;
+            const etag = `"${goldData.buy}-${goldData.sell}-${rateData.price_formatted}-${rateData.updated_at || rateData.time || ''}-${goldData.updated_at || ''}-${usdHistory.length}-${goldHistory.length}"`;
             res.setHeader('ETag', etag);
 
             const clientEtag = req.headers['if-none-match'];
