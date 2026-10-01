@@ -18,6 +18,32 @@ let goldMemoryCache = {
     minuteBucket: null
 };
 let goldMemoryHistory = [];
+const BACKEND_VERSION = 'v26.10.01.1';
+const DEPLOYED_AT = '2026-10-01';
+
+// Module-level cached formatters (di-reuse selama serverless instance warm)
+const wibTimeFormatter = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Jakarta',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+});
+const wibMinuteFormatter = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+});
+const wibDateFormatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+});
 
 /**
  * Format waktu saat ini ke Waktu Indonesia Barat (WIB / Asia/Jakarta, UTC+7)
@@ -26,26 +52,10 @@ function getWibTimeInfo() {
     const now = new Date();
     
     // Format HH:MM:SS dalam zona waktu Asia/Jakarta (WIB)
-    const timeFormatter = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Asia/Jakarta',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: false
-    });
-    const timeWib = timeFormatter.format(now);
+    const timeWib = wibTimeFormatter.format(now);
 
     // Format YYYY-MM-DD HH:mm untuk minute bucket
-    const minuteFormatter = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Asia/Jakarta',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false
-    });
-    const minuteBucketKey = minuteFormatter.format(now);
+    const minuteBucketKey = wibMinuteFormatter.format(now);
 
     // Detik & menit saat ini dalam WIB
     const parts = timeWib.split(':');
@@ -53,13 +63,7 @@ function getWibTimeInfo() {
     const currentMinute = parseInt(parts[1], 10) || 0;
 
     // Format YYYY-MM-DD HH:mm:ss untuk timestamp lengkap WIB
-    const dateFormatter = new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'Asia/Jakarta',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit'
-    });
-    const dateWib = dateFormatter.format(now);
+    const dateWib = wibDateFormatter.format(now);
     const updatedAtWib = `${dateWib} ${timeWib}`;
 
     // Format ISO standar UTC untuk sinkronisasi waktu client-server yang akurat
@@ -76,16 +80,7 @@ function getTreasuryMinuteBucket(dateStr) {
     try {
         const d = new Date(dateStr.replace(' ', 'T') + '+07:00');
         if (Number.isNaN(d.getTime())) return null;
-        const minuteFormatter = new Intl.DateTimeFormat('en-GB', {
-            timeZone: 'Asia/Jakarta',
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: false
-        });
-        return minuteFormatter.format(d);
+        return wibMinuteFormatter.format(d);
     } catch (e) {
         return null;
     }
@@ -132,22 +127,9 @@ function parseGoogleFinanceUtcTime(html) {
         const dateObj = new Date(utcMs);
         if (Number.isNaN(dateObj.getTime())) return null;
 
-        // Format WIB (UTC+7)
-        const timeWib = new Intl.DateTimeFormat('en-GB', {
-            timeZone: 'Asia/Jakarta',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false
-        }).format(dateObj);
-
-        const dateFormatter = new Intl.DateTimeFormat('en-CA', {
-            timeZone: 'Asia/Jakarta',
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit'
-        });
-        const dateWib = dateFormatter.format(dateObj); // "YYYY-MM-DD"
+        // Format WIB (UTC+7) menggunakan cached formatters
+        const timeWib = wibTimeFormatter.format(dateObj);
+        const dateWib = wibDateFormatter.format(dateObj); // "YYYY-MM-DD"
         const updatedAtWib = `${dateWib} ${timeWib}`;
 
         return {
@@ -174,7 +156,7 @@ async function fetchExchangeRate({ force = false } = {}) {
     }
 
     let price = null;
-    let changePercent = -0.17;
+    let changePercent = 0;
     let source = 'unknown';
     let marketTimeInfo = null;
 
@@ -488,6 +470,27 @@ export default async function handler(req, res) {
         return res.status(200).end();
     }
 
+    res.setHeader('X-Backend-Version', BACKEND_VERSION);
+
+    // Endpoint bukti verifikasi cepat: /api/index?version=true atau ?health=true
+    if (req.query && (req.query.version !== undefined || req.query.health !== undefined || req.query.check !== undefined)) {
+        const commitSha = process.env.VERCEL_GIT_COMMIT_SHA 
+            ? process.env.VERCEL_GIT_COMMIT_SHA.slice(0, 7) 
+            : (process.env.VERCEL ? 'vercel-deployed' : 'local');
+        return res.status(200).json({
+            success: true,
+            service: 'susdidr-backend',
+            version: BACKEND_VERSION,
+            deployed_at: DEPLOYED_AT,
+            commit_sha: commitSha,
+            deployment_id: process.env.VERCEL_DEPLOYMENT_ID || null,
+            environment: process.env.VERCEL_ENV || 'production',
+            region: process.env.VERCEL_REGION || 'sin1',
+            server_time: getWibTimeInfo().timeWib,
+            status: 'operational'
+        });
+    }
+
     try {
         const timeInfo = getWibTimeInfo();
         const isMinuteTransition = timeInfo.currentSecond <= 8;
@@ -539,7 +542,7 @@ export default async function handler(req, res) {
 
         // ETag Caching (HTTP 304 Not Modified) hanya di luar jendela transisi menit
         if (!isForce && !isMinuteTransition) {
-            const etag = `"${goldData.buy}-${goldData.sell}-${rateData.price_formatted}-${rateData.updated_at || rateData.time || ''}-${goldData.updated_at || ''}-${usdHistory.length}-${goldHistory.length}"`;
+            const etag = `"${goldData.buy}-${goldData.sell}-${rateData.price_formatted}"`;
             res.setHeader('ETag', etag);
 
             const clientEtag = req.headers['if-none-match'];
@@ -548,8 +551,15 @@ export default async function handler(req, res) {
             }
         }
 
+        const commitSha = process.env.VERCEL_GIT_COMMIT_SHA 
+            ? process.env.VERCEL_GIT_COMMIT_SHA.slice(0, 7) 
+            : (process.env.VERCEL ? 'vercel-deployed' : 'local');
+
         const responsePayload = {
             success: true,
+            version: BACKEND_VERSION,
+            deployed_at: DEPLOYED_AT,
+            commit_sha: commitSha,
             server_time: timeInfo.timeWib,
             timezone: 'WIB (UTC+7)',
             timestamp: timeInfo.isoWib,
@@ -562,9 +572,10 @@ export default async function handler(req, res) {
         return res.status(200).json(responsePayload);
 
     } catch (err) {
+        console.error('[API Error]', err);
         return res.status(500).json({
             success: false,
-            error: err.message || 'Internal Server Error'
+            error: 'Internal Server Error'
         });
     }
 }
