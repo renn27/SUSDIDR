@@ -18,7 +18,7 @@ let goldMemoryCache = {
     minuteBucket: null
 };
 let goldMemoryHistory = [];
-const BACKEND_VERSION = 'v26.10.01.3';
+const BACKEND_VERSION = 'v26.10.01.4';
 const DEPLOYED_AT = '2026-10-01';
 
 // Module-level cached formatters (di-reuse selama serverless instance warm)
@@ -302,12 +302,13 @@ async function fetchExchangeRate({ force = false } = {}) {
         source: source
     };
 
-    // Riwayat USD/IDR: Tambahkan jika harga berubah atau belum ada riwayat sama sekali
+    // Riwayat USD/IDR: Gunakan waktu server nyata WIB agar setiap pergerakan harga memiliki detik pencatatan yang presisi dan unik
     const historyItem = {
         price: result.price_formatted,
-        time: actualTimeWib,
-        updated_at: actualUpdatedAt,
-        timestamp: actualTimestamp,
+        time: serverTimeWib,
+        market_time: actualTimeWib,
+        updated_at: serverUpdatedAtWib,
+        timestamp: serverIsoWib,
         market_time_raw: rawMarketTime,
         value: price,
         change_percent: changePercent
@@ -319,10 +320,8 @@ async function fetchExchangeRate({ force = false } = {}) {
             usdMemoryHistory.shift();
         }
     } else if (usdMemoryHistory.length > 0) {
-        // Jika harga sama tapi timestamp pasar terupdate, sinkronkan data item terakhir
-        usdMemoryHistory[usdMemoryHistory.length - 1].time = actualTimeWib;
-        usdMemoryHistory[usdMemoryHistory.length - 1].updated_at = actualUpdatedAt;
-        usdMemoryHistory[usdMemoryHistory.length - 1].timestamp = actualTimestamp;
+        // Jika harga sama tapi timestamp pasar terupdate, sinkronkan metadata item terakhir
+        usdMemoryHistory[usdMemoryHistory.length - 1].market_time = actualTimeWib;
         usdMemoryHistory[usdMemoryHistory.length - 1].market_time_raw = rawMarketTime;
     }
 
@@ -528,7 +527,8 @@ export default async function handler(req, res) {
 
         const usdHistory = usdMemoryHistory.length ? usdMemoryHistory : [{
             price: rateData.price_formatted,
-            time: rateData.time,
+            time: timeInfo.timeWib,
+            market_time: rateData.time,
             value: rateData.price,
             change_percent: rateData.change_percent
         }];
