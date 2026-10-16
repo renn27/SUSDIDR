@@ -18,8 +18,8 @@ let goldMemoryCache = {
     minuteBucket: null
 };
 let goldMemoryHistory = [];
-const BACKEND_VERSION = 'v26.10.01.5';
-const DEPLOYED_AT = '2026-10-01';
+const BACKEND_VERSION = 'v26.10.16.1';
+const DEPLOYED_AT = '2026-10-16';
 
 // Module-level cached formatters (di-reuse selama serverless instance warm)
 const wibTimeFormatter = new Intl.DateTimeFormat('en-GB', {
@@ -336,7 +336,7 @@ async function fetchExchangeRate({ force = false } = {}) {
 }
 
 /**
- * 2. Mengambil data Harga Emas dari API Resmi Treasury (api.treasury.id)
+ * 2. Mengambil data Harga Emas dari API Resmi WebV2 Treasury (webv2-api.treasury.id)
  * Dilengkapi Smart Minute Caching & Perhitungan Metrik Otomatis
  */
 async function fetchTreasuryGold({ force = false } = {}) {
@@ -364,24 +364,44 @@ async function fetchTreasuryGold({ force = false } = {}) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 4000);
 
-        const res = await fetch('https://api.treasury.id/api/v1/antigrvty/gold/rate', {
+        const now = new Date();
+        const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+        const pad = (n) => String(n).padStart(2, '0');
+        const fmt = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+
+        const res = await fetch('https://webv2-api.treasury.id/api/v1/external/wp/gold/price', {
             method: 'POST',
             signal: controller.signal,
             headers: {
                 'Accept': 'application/json, text/plain, */*',
-                'Accept-Language': 'en-ID,en-GB;q=0.9,en-US;q=0.8,en;q=0.7,id;q=0.6',
                 'Content-Type': 'application/json',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-            }
+            },
+            body: JSON.stringify({
+                start_date: fmt(yesterday),
+                end_date: fmt(now),
+                type: 'daily',
+                region: 'id',
+                assetType: 'gold'
+            })
         });
         clearTimeout(timeoutId);
 
         if (res.ok) {
             const json = await res.json();
-            if (json && json.data) {
-                buy = Number(json.data.buying_rate);
-                sell = Number(json.data.selling_rate);
-                updatedAt = json.data.updated_at;
+            const prices = json?.data?.attributes?.prices;
+            if (prices && prices.length) {
+                const latest = prices[prices.length - 1];
+                buy = Number(latest.buy_price);
+                sell = Number(latest.sell_price);
+                if (latest.datetime && latest.datetime.includes(' - ')) {
+                    const parts = latest.datetime.split(' - ');
+                    const dateParts = parts[0].split('/');
+                    const fullYear = dateParts[2].length === 2 ? `20${dateParts[2]}` : dateParts[2];
+                    updatedAt = `${fullYear}-${dateParts[1].padStart(2, '0')}-${dateParts[0].padStart(2, '0')} ${parts[1].trim()}:00`;
+                } else {
+                    updatedAt = fmt(now);
+                }
             }
         }
     } catch (err) {
