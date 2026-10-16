@@ -18,7 +18,7 @@ let goldMemoryCache = {
     minuteBucket: null
 };
 let goldMemoryHistory = [];
-const BACKEND_VERSION = 'v26.10.16.1';
+const BACKEND_VERSION = 'v26.10.16.2';
 const DEPLOYED_AT = '2026-10-16';
 
 // Module-level cached formatters (di-reuse selama serverless instance warm)
