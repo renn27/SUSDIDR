@@ -18,7 +18,7 @@ let goldMemoryCache = {
     minuteBucket: null
 };
 let goldMemoryHistory = [];
-const BACKEND_VERSION = 'v26.10.29.1';
+const BACKEND_VERSION = 'v26.10.29.2';
 const DEPLOYED_AT = '2026-10-29';
 
 // Module-level cached formatters (di-reuse selama serverless instance warm)
@@ -571,20 +571,6 @@ export default async function handler(req, res) {
             value: rateData.price,
             change_percent: rateData.change_percent
         }];
-
-        // ETag Caching (HTTP 304 Not Modified)
-        if (!isForce) {
-            const lastHistTime = usdHistory[usdHistory.length - 1]?.time || '';
-            const etag = includeGold && goldData
-                ? `"${goldData.buy}-${goldData.sell}-${rateData.price_formatted}-${lastHistTime}"`
-                : `"${rateData.price_formatted}-${usdHistory.length}-${lastHistTime}"`;
-            res.setHeader('ETag', etag);
-
-            const clientEtag = req.headers['if-none-match'];
-            if (clientEtag && (clientEtag === etag || clientEtag.replace(/^W\//, '') === etag.replace(/^W\//, ''))) {
-                return res.status(304).end();
-            }
-        }
 
         const commitSha = process.env.VERCEL_GIT_COMMIT_SHA 
             ? process.env.VERCEL_GIT_COMMIT_SHA.slice(0, 7) 
