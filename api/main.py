@@ -435,7 +435,7 @@ def get_open_er_api_mock(db: Session = Depends(get_db)):
 # WebSocket Endpoint (Live Streaming Push ke PantauTreasury)
 # ==============================================================================
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, db: Session = Depends(get_db)):
+async def websocket_endpoint(websocket: WebSocket):
     """
     WebSocket endpoint versi mandiri (Self-Hosted) untuk PantauTreasury.
     - Tidak butuh tiket / Cloudflare Turnstile token
@@ -444,28 +444,42 @@ async def websocket_endpoint(websocket: WebSocket, db: Session = Depends(get_db)
     """
     await ws_manager.connect(websocket)
     try:
-        # Kirim payload inisial saat client pertama kali tersambung (maks 10 data)
-        latest = get_latest_rate(db, pair=settings.PAIR_NAME)
-        records, _ = get_rate_history(db, pair=settings.PAIR_NAME, limit=10, offset=0)
-        
-        history_items = []
-        for rec in reversed(records):
-            history_items.append({
-                "price": f"{rec.price:.4f}",
-                "time": rec.timestamp.strftime("%H:%M:%S"),
-                "value": rec.price,
-                "change_percent": rec.change_percent
-            })
+        # Gunakan short-lived DB session khusus untuk mengambil initial snapshot agar koneksi DB tidak bocor selama WS terbuka
+        db_provider = app.dependency_overrides.get(get_db, get_db)
+        db_gen = db_provider()
+        db = next(db_gen)
+        try:
+            latest = get_latest_rate(db, pair=settings.PAIR_NAME)
+            records, _ = get_rate_history(db, pair=settings.PAIR_NAME, limit=10, offset=0)
 
-        initial_payload = {
-            "type": "INITIAL_DATA",
-            "pair": settings.PAIR_NAME,
-            "price": latest.price if latest else 0.0,
-            "change_percent": latest.change_percent if latest else 0.0,
-            "time": latest.timestamp.strftime("%H:%M:%S") if latest else "",
-            "history": history_items,
-            "usd_idr_history": history_items
-        }
+            history_items = []
+            for rec in reversed(records):
+                history_items.append({
+                    "price": f"{rec.price:.4f}",
+                    "time": rec.timestamp.strftime("%H:%M:%S"),
+                    "updated_at": rec.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    "timestamp": rec.timestamp.isoformat(),
+                    "value": rec.price,
+                    "change_percent": rec.change_percent
+                })
+
+            initial_payload = {
+                "type": "INITIAL_DATA",
+                "pair": settings.PAIR_NAME,
+                "price": latest.price if latest else 0.0,
+                "change_percent": latest.change_percent if latest else 0.0,
+                "time": latest.timestamp.strftime("%H:%M:%S") if latest else "",
+                "timestamp": latest.timestamp.isoformat() if latest else "",
+                "history": history_items,
+                "usd_idr_history": history_items
+            }
+        finally:
+            try:
+                next(db_gen)
+            except StopIteration:
+                pass
+            db_gen.close()
+
         await websocket.send_json(initial_payload)
 
         # Loop mempertahankan koneksi dan merespons ping

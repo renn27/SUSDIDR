@@ -7,7 +7,7 @@
 let usdMemoryCache = {
     data: null,
     lastFetchedAt: 0,
-    ttlMs: 3000 // Cache 3 detik
+    ttlMs: 4500 // Cache 4.5 detik (selaras dengan polling 6 detik)
 };
 let usdMemoryHistory = [];
 
@@ -18,8 +18,8 @@ let goldMemoryCache = {
     minuteBucket: null
 };
 let goldMemoryHistory = [];
-const BACKEND_VERSION = 'v26.10.16.2';
-const DEPLOYED_AT = '2026-10-16';
+const BACKEND_VERSION = 'v26.10.29.1';
+const DEPLOYED_AT = '2026-10-29';
 
 // Module-level cached formatters (di-reuse selama serverless instance warm)
 const wibTimeFormatter = new Intl.DateTimeFormat('en-GB', {
@@ -329,7 +329,7 @@ async function fetchExchangeRate({ force = false } = {}) {
     usdMemoryCache = {
         data: result,
         lastFetchedAt: nowMs,
-        ttlMs: 3000
+        ttlMs: 4500
     };
 
     return result;
@@ -337,19 +337,19 @@ async function fetchExchangeRate({ force = false } = {}) {
 
 /**
  * 2. Mengambil data Harga Emas dari API Resmi WebV2 Treasury (webv2-api.treasury.id)
- * Dilengkapi Smart Minute Caching & Perhitungan Metrik Otomatis
+ * Dilengkapi Smart Minute Caching & Perhitungan Metrik Otomatis (Digunakan khusus saat fallback ?include_gold=true)
  */
 async function fetchTreasuryGold({ force = false } = {}) {
     const timeInfo = getWibTimeInfo();
     const nowMs = Date.now();
 
     // SMART MINUTE CACHE:
-    // Jika data menit saat ini sudah valid di cache dan BUKAN force refresh,
-    // kita gunakan cache. Tapi jika detik 00-08 atau belum menit aktif, selalu tembak live!
+    // Gunakan cache jika masih dalam menit yang sama ATAU baru diambil < 15 detik yang lalu
     const isMinuteTransition = timeInfo.currentSecond <= 8;
-    const isCacheValid = !force && !isMinuteTransition && 
-                         goldMemoryCache.data && 
-                         goldMemoryCache.minuteBucket === timeInfo.minuteBucketKey;
+    const isCacheValid = !force && goldMemoryCache.data && (
+        (!isMinuteTransition && goldMemoryCache.minuteBucket === timeInfo.minuteBucketKey) ||
+        (nowMs - goldMemoryCache.lastFetchedAt < 15000)
+    );
 
     if (isCacheValid) {
         return goldMemoryCache.data;
@@ -366,8 +366,7 @@ async function fetchTreasuryGold({ force = false } = {}) {
 
         const now = new Date();
         const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-        const pad = (n) => String(n).padStart(2, '0');
-        const fmt = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+        const fmt = (d) => `${wibDateFormatter.format(d)} ${wibTimeFormatter.format(d)}`;
 
         const res = await fetch('https://webv2-api.treasury.id/api/v1/external/wp/gold/price', {
             method: 'POST',
@@ -416,7 +415,7 @@ async function fetchTreasuryGold({ force = false } = {}) {
     if (!buy || !sell) {
         buy = 1450000;
         sell = 1390000;
-        updatedAt = timeInfo.timeWib;
+        updatedAt = timeInfo.updatedAtWib;
         source = 'default-fallback';
     }
 
@@ -424,9 +423,9 @@ async function fetchTreasuryGold({ force = false } = {}) {
     const spread = buy - sell;
     const spreadPercent = parseFloat(((spread / buy) * 100).toFixed(2));
     const gramBeli60m = Math.floor((60000000 / buy) * 10000) / 10000;
-    const gramJual58m = Math.floor((58005000 / sell) * 10000) / 10000;
+    const gramJual58m = Math.floor((58006500 / sell) * 10000) / 10000;
     const nilaiJual = Math.round((60000000 / buy) * sell);
-    const cuan = Math.round(nilaiJual - 58005000);
+    const cuan = Math.round(nilaiJual - 58006500);
 
     const goldMinuteBucket = getTreasuryMinuteBucket(updatedAt);
     const isCurrentMinute = goldMinuteBucket === timeInfo.minuteBucketKey;
@@ -440,7 +439,7 @@ async function fetchTreasuryGold({ force = false } = {}) {
         gram_jual_58m: gramJual58m,
         nilai_jual: nilaiJual,
         cuan: cuan,
-        updated_at: updatedAt || timeInfo.timeWib,
+        updated_at: updatedAt || timeInfo.updatedAtWib,
         is_current_minute: isCurrentMinute,
         source: source
     };
@@ -450,7 +449,7 @@ async function fetchTreasuryGold({ force = false } = {}) {
         buy: buy,
         sell: sell,
         time: updatedAt ? updatedAt.split(' ')[1] || timeInfo.timeWib : timeInfo.timeWib,
-        updated_at: updatedAt || timeInfo.timeWib
+        updated_at: updatedAt || timeInfo.updatedAtWib
     };
 
     if (!goldMemoryHistory.length || 
@@ -483,7 +482,8 @@ export default async function handler(req, res) {
     // Headers CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control, If-None-Match');
+    res.setHeader('Access-Control-Expose-Headers', 'ETag, X-Backend-Version, Date');
 
     if (req.method === 'OPTIONS') {
         return res.status(200).end();
@@ -491,8 +491,14 @@ export default async function handler(req, res) {
 
     res.setHeader('X-Backend-Version', BACKEND_VERSION);
 
-    // Endpoint bukti verifikasi cepat: /api/index?version=true atau ?health=true
+    // Endpoint bukti verifikasi cepat & sinkronisasi jam presisi: /api/index?version=true atau ?health=true
     if (req.query && (req.query.version !== undefined || req.query.health !== undefined || req.query.check !== undefined)) {
+        // Wajib no-store agar CDN tidak pernah men-cache timestamp sinkronisasi jam server!
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+
+        const timeInfo = getWibTimeInfo();
         const commitSha = process.env.VERCEL_GIT_COMMIT_SHA 
             ? process.env.VERCEL_GIT_COMMIT_SHA.slice(0, 7) 
             : (process.env.VERCEL ? 'vercel-deployed' : 'local');
@@ -505,64 +511,73 @@ export default async function handler(req, res) {
             deployment_id: process.env.VERCEL_DEPLOYMENT_ID || null,
             environment: process.env.VERCEL_ENV || 'production',
             region: process.env.VERCEL_REGION || 'sin1',
-            server_time: getWibTimeInfo().timeWib,
+            server_time: timeInfo.timeWib,
+            timestamp: timeInfo.isoWib,
             status: 'operational'
         });
     }
 
     try {
-        const timeInfo = getWibTimeInfo();
-        const isMinuteTransition = timeInfo.currentSecond <= 8;
+        const includeGold = req.query.include_gold === 'true' || req.query.gold === 'true';
 
-        // Cek apakah request meminta force live refresh (misal tombol refresh besar atau detik 1 auto-sync)
-        const isForce = req.query.force === 'true' || 
-                        req.query.refresh === 'true' || 
-                        isMinuteTransition ||
-                        (req.headers['cache-control'] && req.headers['cache-control'].includes('no-cache'));
+        // Cek apakah request meminta force live refresh secara eksplisit
+        const isForce = req.query.force === 'true' || req.query.refresh === 'true';
 
         // Caching Header:
-        // Saat detik 00-08 (jendela rilis Treasury) atau saat force refresh -> NO-CACHE sama sekali agar CDN tidak menahan data lama!
-        // Saat detik 09-59 dan data sudah aktif -> Cache 3 detik di CDN edge untuk efisiensi
-        if (isForce || isMinuteTransition) {
+        // Secara default di-cache 4 detik di CDN edge Vercel untuk respon instan (<50ms) di 1-2 perangkat
+        if (isForce) {
             res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
             res.setHeader('Pragma', 'no-cache');
             res.setHeader('Expires', '0');
         } else {
-            res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=3, stale-while-revalidate=3');
+            res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=4, stale-while-revalidate=2');
         }
 
-        // Eksekusi paralel Google Finance USD/IDR dan Treasury Gold
-        const [rateResult, goldResult] = await Promise.allSettled([
-            fetchExchangeRate({ force: isForce }),
-            fetchTreasuryGold({ force: isForce })
-        ]);
+        // Secara default hanya jalankan scraping USD/IDR agar cepat & ringan.
+        // Fetch emas Treasury hanya dijalankan jika diminta secara eksplisit (?include_gold=true) untuk fallback Tier-2.
+        let rateData;
+        let goldData = null;
 
-        const rateData = rateResult.status === 'fulfilled' ? rateResult.value : (usdMemoryCache.data || {
-            pair: 'USD/IDR', price: 17800.0, price_formatted: '17800.0000', change_percent: 0.0, time: '00:00:00'
-        });
+        if (includeGold) {
+            const [rateResult, goldResult] = await Promise.allSettled([
+                fetchExchangeRate({ force: isForce }),
+                fetchTreasuryGold({ force: isForce })
+            ]);
+            rateData = rateResult.status === 'fulfilled' ? rateResult.value : (usdMemoryCache.data || {
+                pair: 'USD/IDR', price: 17800.0, price_formatted: '17800.0000', change_percent: 0.0, time: '00:00:00'
+            });
+            goldData = goldResult.status === 'fulfilled' ? goldResult.value : (goldMemoryCache.data || {
+                buy: 1450000, sell: 1390000, spread: 60000, spread_percent: 4.14, updated_at: '-'
+            });
+        } else {
+            try {
+                rateData = await fetchExchangeRate({ force: isForce });
+            } catch (e) {
+                rateData = usdMemoryCache.data || {
+                    pair: 'USD/IDR', price: 17800.0, price_formatted: '17800.0000', change_percent: 0.0, time: '00:00:00'
+                };
+            }
+        }
 
-        const goldData = goldResult.status === 'fulfilled' ? goldResult.value : (goldMemoryCache.data || {
-            buy: 1450000, sell: 1390000, spread: 60000, spread_percent: 4.14, updated_at: '-'
-        });
+        // Ambil timestamp server SETELAH proses fetch selesai agar tidak tertinggal oleh durasi scraping
+        const timeInfo = getWibTimeInfo();
 
         const usdHistory = usdMemoryHistory.length ? usdMemoryHistory : [{
             price: rateData.price_formatted,
             time: timeInfo.timeWib,
             market_time: rateData.time,
+            updated_at: timeInfo.updatedAtWib,
+            timestamp: timeInfo.isoWib,
             value: rateData.price,
             change_percent: rateData.change_percent
         }];
 
-        const goldHistory = goldMemoryHistory.length ? goldMemoryHistory : [{
-            buy: goldData.buy,
-            sell: goldData.sell,
-            time: goldData.updated_at ? goldData.updated_at.split(' ')[1] || rateData.time : rateData.time,
-            updated_at: goldData.updated_at
-        }];
-
-        // ETag Caching (HTTP 304 Not Modified) hanya di luar jendela transisi menit
-        if (!isForce && !isMinuteTransition) {
-            const etag = `"${goldData.buy}-${goldData.sell}-${rateData.price_formatted}"`;
+        // ETag Caching (HTTP 304 Not Modified)
+        if (!isForce) {
+            const lastHistTime = usdHistory[usdHistory.length - 1]?.time || '';
+            const etag = includeGold && goldData
+                ? `"${goldData.buy}-${goldData.sell}-${rateData.price_formatted}-${lastHistTime}"`
+                : `"${rateData.price_formatted}-${usdHistory.length}-${lastHistTime}"`;
             res.setHeader('ETag', etag);
 
             const clientEtag = req.headers['if-none-match'];
@@ -583,11 +598,19 @@ export default async function handler(req, res) {
             server_time: timeInfo.timeWib,
             timezone: 'WIB (UTC+7)',
             timestamp: timeInfo.isoWib,
-            gold: goldData,
             usd_idr: rateData,
-            gold_history: goldHistory,
             usd_idr_history: usdHistory
         };
+
+        if (includeGold && goldData) {
+            responsePayload.gold = goldData;
+            responsePayload.gold_history = goldMemoryHistory.length ? goldMemoryHistory : [{
+                buy: goldData.buy,
+                sell: goldData.sell,
+                time: goldData.updated_at ? goldData.updated_at.split(' ')[1] || rateData.time : rateData.time,
+                updated_at: goldData.updated_at
+            }];
+        }
 
         return res.status(200).json(responsePayload);
 
