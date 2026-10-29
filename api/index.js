@@ -7,7 +7,7 @@
 let usdMemoryCache = {
     data: null,
     lastFetchedAt: 0,
-    ttlMs: 4500 // Cache 4.5 detik (selaras dengan polling 6 detik)
+    ttlMs: 1500 // Cache 1.5 detik (selaras dengan polling 3 detik tanpa double-cache stacking)
 };
 let usdMemoryHistory = [];
 
@@ -18,7 +18,7 @@ let goldMemoryCache = {
     minuteBucket: null
 };
 let goldMemoryHistory = [];
-const BACKEND_VERSION = 'v26.10.29.2';
+const BACKEND_VERSION = 'v26.10.29.3';
 const DEPLOYED_AT = '2026-10-29';
 
 // Module-level cached formatters (di-reuse selama serverless instance warm)
@@ -282,31 +282,15 @@ async function fetchExchangeRate({ force = false } = {}) {
 
     const { timeWib: serverTimeWib, updatedAtWib: serverUpdatedAtWib, isoWib: serverIsoWib } = getWibTimeInfo();
 
-    // Gunakan waktu pasar resmi jika tersedia, atau fallback ke waktu server jika belum ada
-    const actualTimeWib = marketTimeInfo ? marketTimeInfo.timeWib : serverTimeWib;
-    const actualUpdatedAt = marketTimeInfo ? marketTimeInfo.updatedAtWib : serverUpdatedAtWib;
-    const actualTimestamp = marketTimeInfo ? marketTimeInfo.isoUtc : serverIsoWib;
+    // Waktu pasar resmi Google Finance (untuk metadata/tooltip)
+    const actualMarketTimeWib = marketTimeInfo ? marketTimeInfo.timeWib : serverTimeWib;
     const rawMarketTime = marketTimeInfo ? marketTimeInfo.rawMarketTime : '';
-
-    const result = {
-        pair: 'USD/IDR',
-        price: price,
-        price_formatted: price.toFixed(4),
-        change_percent: changePercent,
-        time: actualTimeWib,
-        updated_at: actualUpdatedAt,
-        timestamp: actualTimestamp,
-        market_time_raw: rawMarketTime,
-        server_time: serverTimeWib,
-        timezone: 'WIB (UTC+7)',
-        source: source
-    };
 
     // Riwayat USD/IDR: Gunakan waktu server nyata WIB agar setiap pergerakan harga memiliki detik pencatatan yang presisi dan unik
     const historyItem = {
-        price: result.price_formatted,
+        price: price.toFixed(4),
         time: serverTimeWib,
-        market_time: actualTimeWib,
+        market_time: actualMarketTimeWib,
         updated_at: serverUpdatedAtWib,
         timestamp: serverIsoWib,
         market_time_raw: rawMarketTime,
@@ -321,15 +305,32 @@ async function fetchExchangeRate({ force = false } = {}) {
         }
     } else if (usdMemoryHistory.length > 0) {
         // Jika harga sama tapi timestamp pasar terupdate, sinkronkan metadata item terakhir
-        usdMemoryHistory[usdMemoryHistory.length - 1].market_time = actualTimeWib;
+        usdMemoryHistory[usdMemoryHistory.length - 1].market_time = actualMarketTimeWib;
         usdMemoryHistory[usdMemoryHistory.length - 1].market_time_raw = rawMarketTime;
     }
+
+    const latestHistoryEntry = usdMemoryHistory[usdMemoryHistory.length - 1] || historyItem;
+
+    const result = {
+        pair: 'USD/IDR',
+        price: price,
+        price_formatted: price.toFixed(4),
+        change_percent: changePercent,
+        time: latestHistoryEntry.time,
+        updated_at: latestHistoryEntry.updated_at,
+        timestamp: latestHistoryEntry.timestamp,
+        market_time: actualMarketTimeWib,
+        market_time_raw: rawMarketTime,
+        server_time: serverTimeWib,
+        timezone: 'WIB (UTC+7)',
+        source: source
+    };
 
     // Perbarui in-memory cache
     usdMemoryCache = {
         data: result,
         lastFetchedAt: nowMs,
-        ttlMs: 4500
+        ttlMs: 1500
     };
 
     return result;
@@ -524,13 +525,13 @@ export default async function handler(req, res) {
         const isForce = req.query.force === 'true' || req.query.refresh === 'true';
 
         // Caching Header:
-        // Secara default di-cache 4 detik di CDN edge Vercel untuk respon instan (<50ms) di 1-2 perangkat
+        // Di-cache 2 detik di CDN edge Vercel (selaras dengan polling 3 detik untuk 1-2 perangkat tanpa double-cache delay)
         if (isForce) {
             res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
             res.setHeader('Pragma', 'no-cache');
             res.setHeader('Expires', '0');
         } else {
-            res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=4, stale-while-revalidate=2');
+            res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=2, stale-while-revalidate=1');
         }
 
         // Secara default hanya jalankan scraping USD/IDR agar cepat & ringan.
